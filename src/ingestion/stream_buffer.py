@@ -1,19 +1,10 @@
-"""stream_buffer.py — zero-copy JSON stream parser using memoryview.
-
-Accepts raw network binary blocks and locates newline-delimited JSON frames
-without allocating intermediate string objects, reducing GC pressure during
-high-volume market-volatility spikes.
-"""
 from __future__ import annotations
 
-import json
 from typing import Any, Generator
-
-_NEWLINE = ord("\n")
-
+from src.serialization.encoders import unpack_bundle, FRAME_SIZE
 
 class StreamBuffer:
-    """Accumulate binary chunks and yield parsed JSON objects zero-copy."""
+    """Accumulate binary chunks and yield parsed TelemetryFrames."""
 
     __slots__ = ("_buf",)
 
@@ -21,34 +12,28 @@ class StreamBuffer:
         self._buf = bytearray()
 
     def feed(self, data: bytes | bytearray | memoryview) -> Generator[Any, None, None]:
-        """Append *data* and yield every complete newline-delimited JSON frame.
+        """Append *data* and yield every complete binary telemetry frame.
 
-        A memoryview over the internal bytearray is used during the scan phase
-        to slice frame boundaries without intermediate string copies.  The view
-        is released before the buffer is trimmed so the bytearray can resize.
+        Frames are fixed-size (FRAME_SIZE bytes), allowing efficient slicing
+        without scanning for delimiters.
         """
-        self._buf += data  # single extend, no str conversion
+        self._buf += data
 
-        frames: list[bytes] = []
-        start = 0
+        # Calculate how many full frames we have
+        num_frames = len(self._buf) // FRAME_SIZE
+        if num_frames == 0:
+            return
 
-        view = memoryview(self._buf)
-        for i in range(len(view)):
-            if view[i] == _NEWLINE:
-                if i > start:
-                    frames.append(bytes(view[start:i]))
-                start = i + 1
-        consumed = start
-        view.release()  # release before resizing
+        # Extract the contiguous block of full frames
+        consumed = num_frames * FRAME_SIZE
+        frame_data = bytes(self._buf[:consumed])
+        del self._buf[:consumed]
 
-        del self._buf[:consumed]  # keep only the incomplete trailing fragment
-
-        for frame in frames:
-            yield json.loads(frame)
+        # Use the binary unpacker to yield TelemetryFrame objects
+        yield from unpack_bundle(frame_data)
 
     def reset(self) -> None:
         """Discard all buffered data."""
         self._buf.clear()
-
 
 __all__ = ["StreamBuffer"]
